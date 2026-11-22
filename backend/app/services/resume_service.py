@@ -4,179 +4,127 @@ from pathlib import Path
 
 import pymupdf
 from docx import Document
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 
-# Transformer model configuration
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-
-_model = None
-
-
-def get_model():
-    """
-    Load the Transformer model only when resume analysis is requested.
-    This prevents PyTorch from loading during API startup.
-    """
-    global _model
-
-    if _model is None:
-        import torch
-        from sentence_transformers import SentenceTransformer
-
-        # Limit CPU thread usage on small hosting instances
-        torch.set_num_threads(1)
-
-        _model = SentenceTransformer(
-            MODEL_NAME,
-            device="cpu"
-        )
-
-    return _model
-
-
+# Extract text from PDF or DOCX
 def extract_resume_text(file_path: str) -> str:
-    """Extract text from PDF or DOCX resumes."""
-
     extension = Path(file_path).suffix.lower()
 
     if extension == ".pdf":
         with pymupdf.open(file_path) as pdf:
-            text = "\n".join(
-                page.get_text() for page in pdf
-            )
+            text = "\n".join(page.get_text() for page in pdf)
 
     elif extension == ".docx":
         document = Document(file_path)
-
         text = "\n".join(
-            paragraph.text
-            for paragraph in document.paragraphs
+            paragraph.text for paragraph in document.paragraphs
         )
 
     else:
-        raise ValueError(
-            "Only PDF and DOCX files are supported."
-        )
+        raise ValueError("Only PDF and DOCX files are supported.")
 
     if not text.strip():
-        raise ValueError(
-            "No readable text found in the resume."
-        )
+        raise ValueError("No readable text found in the resume.")
 
     return text
 
 
 def clean_text(text: str) -> str:
-    """Normalize whitespace in text."""
-
     text = re.sub(r"\s+", " ", text)
-
     return text.strip()
 
 
 SKILLS = [
-    "python",
-    "java",
-    "c++",
-    "sql",
-    "machine learning",
-    "deep learning",
-    "nlp",
-    "natural language processing",
-    "tensorflow",
-    "pytorch",
-    "scikit-learn",
-    "docker",
-    "git",
-    "flask",
-    "django",
-    "fastapi",
-    "react",
-    "mongodb",
-    "aws",
-    "data analysis",
-    "excel",
-    "communication",
-    "problem solving",
-    "rest api"
+    "python", "java", "c++", "sql",
+    "machine learning", "deep learning",
+    "nlp", "natural language processing",
+    "tensorflow", "pytorch", "scikit-learn",
+    "docker", "git", "flask", "django",
+    "fastapi", "react", "mongodb", "aws",
+    "data analysis", "excel", "communication",
+    "problem solving", "rest api",
+    "html", "css", "javascript",
+    "data structures", "algorithms",
+    "opencv", "pandas", "numpy",
+    "power bi", "tableau"
 ]
 
 
-def analyze_resume(
-    resume_text: str,
-    job_description: str
-) -> dict:
-    """
-    Analyze resume using Transformer embeddings
-    and keyword-based skill matching.
-    """
+def find_skills(text: str) -> list:
+    text = text.lower()
+    matched = []
 
+    for skill in SKILLS:
+        pattern = r"(?<!\w)" + re.escape(skill) + r"(?!\w)"
+
+        if re.search(pattern, text):
+            matched.append(skill)
+
+    return matched
+
+
+def analyze_resume(resume_text: str, job_description: str) -> dict:
     resume_text = clean_text(resume_text)
     job_description = clean_text(job_description)
 
     if not resume_text or not job_description:
-        raise ValueError(
-            "Resume and job description cannot be empty."
-        )
+        raise ValueError("Resume and job description cannot be empty.")
 
-    # Load the model only when analysis is requested
-    model = get_model()
+    # Limit text size to keep memory usage low
+    resume_text = resume_text[:20000]
+    job_description = job_description[:20000]
 
-    # Generate normalized CPU embeddings
-    embeddings = model.encode(
-        [resume_text, job_description],
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-        show_progress_bar=False
+    # Lightweight NLP: TF-IDF and cosine similarity
+    vectorizer = TfidfVectorizer(
+        stop_words="english",
+        ngram_range=(1, 2),
+        max_features=12000,
+        sublinear_tf=True
     )
 
-    # Cosine similarity of normalized embeddings
-    similarity = float(
-        (embeddings[0] * embeddings[1]).sum()
-    )
+    try:
+        vectors = vectorizer.fit_transform([
+            resume_text,
+            job_description
+        ])
 
-    semantic_score = round(
-        max(0, min(100, similarity * 100)),
-        2
-    )
+        similarity = cosine_similarity(
+            vectors[0:1],
+            vectors[1:2]
+        )[0][0]
+
+        text_score = round(float(similarity) * 100, 2)
+
+    except ValueError:
+        text_score = 0.0
 
     # Skill matching
-    resume_lower = resume_text.lower()
-    job_lower = job_description.lower()
-
-    required_skills = [
-        skill
-        for skill in SKILLS
-        if skill in job_lower
-    ]
+    required_skills = find_skills(job_description)
+    resume_skills = find_skills(resume_text)
 
     matched_skills = [
-        skill
-        for skill in required_skills
-        if skill in resume_lower
+        skill for skill in required_skills
+        if skill in resume_skills
     ]
 
     missing_skills = [
-        skill
-        for skill in required_skills
-        if skill not in resume_lower
+        skill for skill in required_skills
+        if skill not in resume_skills
     ]
 
     skill_score = (
         round(
-            len(matched_skills)
-            / len(required_skills)
-            * 100,
+            len(matched_skills) / len(required_skills) * 100,
             2
         )
-        if required_skills
-        else 0
+        if required_skills else 0.0
     )
 
-    # Weighted overall score
+    # Overall score
     overall_score = round(
-        (semantic_score * 0.60)
-        + (skill_score * 0.40),
+        (text_score * 0.60) + (skill_score * 0.40),
         2
     )
 
@@ -185,31 +133,30 @@ def analyze_resume(
 
     if missing_skills:
         recommendations.append(
-            "Review the missing job-related skills and "
-            "add them only if you genuinely possess them."
+            "Review missing job-related skills and add them "
+            "only if you genuinely possess them."
         )
 
-    if semantic_score < 50:
+    if text_score < 50:
         recommendations.append(
-            "Improve alignment between your experience "
+            "Improve alignment between your resume experience "
             "and the job description."
         )
 
     if skill_score < 60:
         recommendations.append(
-            "Highlight relevant technical skills "
-            "and project experience."
+            "Highlight relevant technical skills and project experience."
         )
 
     if not recommendations:
         recommendations.append(
-            "Good alignment. Continue improving your "
-            "achievements with measurable results."
+            "Good alignment. Improve your achievements with "
+            "measurable results."
         )
 
     return {
         "overall_score": overall_score,
-        "semantic_similarity": semantic_score,
+        "semantic_similarity": text_score,
         "skill_match": skill_score,
         "matched_skills": matched_skills,
         "missing_skills": missing_skills,
