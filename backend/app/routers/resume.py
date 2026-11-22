@@ -1,17 +1,32 @@
-from fastapi.responses import StreamingResponse
-from backend.app.services.pdf_service import generate_pdf_report
+
+import logging
 import os
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import (
+    APIRouter,
+    UploadFile,
+    File,
+    Form,
+    HTTPException,
+)
+from fastapi.responses import StreamingResponse
 
 from backend.app.services.resume_service import (
     extract_resume_text,
-    analyze_resume
+    analyze_resume,
 )
+from backend.app.services.pdf_service import generate_pdf_report
 
-router = APIRouter(prefix="/api/resume", tags=["Resume Analysis"])
+
+# Logging configuration
+logger = logging.getLogger(__name__)
+
+router = APIRouter(
+    prefix="/api/resume",
+    tags=["Resume Analysis"],
+)
 
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
@@ -19,7 +34,7 @@ MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 @router.post("/analyze")
 async def analyze_uploaded_resume(
     file: UploadFile = File(...),
-    job_description: str = Form(...)
+    job_description: str = Form(...),
 ):
     """Upload a resume and analyze it against a job description."""
 
@@ -28,65 +43,82 @@ async def analyze_uploaded_resume(
     if extension not in [".pdf", ".docx"]:
         raise HTTPException(
             status_code=400,
-            detail="Only PDF and DOCX files are supported."
+            detail="Only PDF and DOCX files are supported.",
         )
 
     if not job_description.strip():
         raise HTTPException(
             status_code=400,
-            detail="Please provide a job description."
+            detail="Please provide a job description.",
         )
 
     temp_path = None
 
     try:
+        # Read uploaded file
         file_content = await file.read(MAX_FILE_SIZE + 1)
 
         if len(file_content) > MAX_FILE_SIZE:
             raise HTTPException(
                 status_code=413,
-                detail="File size must not exceed 5 MB."
+                detail="File size must not exceed 5 MB.",
             )
 
+        # Save temporarily
         with tempfile.NamedTemporaryFile(
             delete=False,
-            suffix=extension
+            suffix=extension,
         ) as temp_file:
             temp_file.write(file_content)
             temp_path = temp_file.name
 
+        # Extract resume text
         resume_text = extract_resume_text(temp_path)
 
+        # Run Transformer-based analysis
         results = analyze_resume(
             resume_text,
-            job_description
+            job_description,
+        )
+
+        logger.info(
+            "Resume analysis completed successfully: %s",
+            file.filename,
         )
 
         return {
             "success": True,
             "filename": file.filename,
             "message": "Resume analysis completed successfully.",
-            "results": results
+            "results": results,
         }
 
     except HTTPException:
         raise
 
     except ValueError as error:
+        logger.warning("Invalid resume input: %s", error)
+
         raise HTTPException(
             status_code=400,
-            detail=str(error)
+            detail=str(error),
         )
 
     except Exception:
+        logger.exception("Resume analysis failed")
+
         raise HTTPException(
             status_code=500,
-            detail="Resume analysis failed. Please try again."
+            detail="Resume analysis failed. Check backend logs.",
         )
 
     finally:
+        # Remove temporary file
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+
+        await file.close()
+
 
 @router.post(
     "/report",
@@ -97,21 +129,26 @@ async def analyze_uploaded_resume(
                 "application/pdf": {
                     "schema": {
                         "type": "string",
-                        "format": "binary"
+                        "format": "binary",
                     }
                 }
             }
         }
-    }
+    },
 )
 async def download_resume_report(payload: dict):
+    """Generate and download a PDF resume analysis report."""
+
     try:
         results = payload.get("results", payload)
 
         report_data = {
             **results,
             "filename": payload.get("filename", "Resume"),
-            "job_description": payload.get("job_description", "Not provided")
+            "job_description": payload.get(
+                "job_description",
+                "Not provided",
+            ),
         }
 
         pdf_buffer = generate_pdf_report(report_data)
@@ -120,12 +157,15 @@ async def download_resume_report(payload: dict):
             pdf_buffer,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": 'attachment; filename="NeuroNexus_Resume_Report.pdf"'
-            }
+                "Content-Disposition":
+                    'attachment; filename="NeuroNexus_Resume_Report.pdf"'
+            },
         )
 
-    except Exception as e:
+    except Exception:
+        logger.exception("PDF report generation failed")
+
         raise HTTPException(
             status_code=500,
-            detail=f"Could not generate PDF report: {str(e)}"
+            detail="Could not generate PDF report.",
         )
